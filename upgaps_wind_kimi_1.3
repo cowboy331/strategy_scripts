@@ -1,0 +1,81 @@
+# -*- coding: utf-8 -*-
+"""
+WindPy 批量筛选近 10 个交易日出现过跳空高开的全部 A 股
+—— 兼容 wsd 一次仅支持单指标的限制
+v1.2变更：将1.1版本的跳空日期更新为时间范围内第一次跳空日期
+v1.3变更：将1.2版本取最近10个交易日改为取最近1个交易日；跳空缺口改为3%
+"""
+
+from WindPy import w
+import pandas as pd
+from datetime import datetime, timedelta
+import os
+
+output_dir = 'gap_up'  # 输出子目录
+os.makedirs(output_dir, exist_ok=True)  # 创建子目录（如果不存在）
+
+w.start()
+
+today = datetime.today()
+end_date = today.strftime('%Y-%m-%d')
+start_date = (today - timedelta(days=20)).strftime('%Y-%m-%d')
+
+# 1. 取全部 A 股代码
+print('正在获取全部 A 股代码……')
+stock_set = w.wset("sectorconstituent", date=end_date, sector="全部A股", usedf=True)
+if stock_set[0] != 0:
+    raise RuntimeError('Wind 代码获取失败:', stock_set[0])
+codes = stock_set[1]['wind_code'].tolist()
+
+# 2. 分别拉取 4 个单指标，再合并
+fields_needed = ['open', 'high', 'low', 'close']
+field_dfs = {}
+
+print('正在逐个指标拉取行情数据……')
+for f in fields_needed:
+    print(f'  获取 {f} ……')
+    data = w.wsd(codes, f, start_date, end_date, "PriceAdj=F", usedf=True)
+    if data[0] != 0:
+        raise RuntimeError(f'Wind 获取 {f} 失败:', data[0])
+    # 把列名改成 MultiIndex 格式，方便后面 concat
+    df = data[1]
+    df.columns = pd.MultiIndex.from_product([codes, [f]])
+    field_dfs[f] = df
+
+# 3. 合并成统一面板（codes × fields）
+kline = pd.concat([field_dfs[f] for f in fields_needed], axis=1)
+kline = kline.sort_index(axis=1)  # 按代码+字段排序，可选
+
+# 4. 检测跳空高开
+gap_list = []
+for code in codes:
+    try:
+        sub = kline.loc[:, (code, slice(None))].copy()
+        sub.columns = sub.columns.droplevel(0)   # 只剩字段名
+        # sub = sub.iloc[-2:-1]                       # 只看最近 1 根
+        sub = sub.tail(3)                       # 只看最近 5 根
+        sub['pre_high'] = sub['high'].shift(1)
+        sub['gap_pct'] = (sub['low'] - sub['pre_high']) / sub['pre_high'] * 100
+        gap = sub[(sub['low'] > sub['pre_high']) & (sub['gap_pct'] >= 2.0)]
+        gap=gap.iloc[-1:]  # 取最近一次跳空
+        if not gap.empty:
+            gap_day = gap.index[0].strftime('%Y-%m-%d')
+            gap_list.append({'wind_code': code, 'latest_gap_date': gap_day})
+    except Exception as e:
+        print('跳过', code, e)
+        continue
+
+result_df = pd.DataFrame(gap_list)
+print('\n近 10 个交易日内出现过跳空高开的股票共 {} 只：'.format(len(result_df)))
+print(result_df.head())
+
+# 5. 保存结果
+out_file = f'gap_up_A_share_{end_date}.csv'
+file_path=os.path.join(output_dir, out_file)    
+result_df.to_csv(file_path, index=False, encoding='utf-8-sig')
+print(f'结果已保存在：{os.path.abspath(out_file)}')
+
+# file_name = f"stock_volume_ratio_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+# file_path = os.path.join(output_dir, file_name)
+# historical_df_sorted.to_excel(file_path, index=False)
+# print(f"\n 数据已保存至: {file_path}")
