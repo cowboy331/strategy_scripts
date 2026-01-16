@@ -1,0 +1,64 @@
+# -*- coding: utf-8 -*-
+"""
+盘中实时扫描：全 A 今日开盘价高于前日最高价 *2%
+wsq 分段获取，避免 4000 上限
+"""
+from WindPy import w
+import pandas as pd
+from datetime import datetime, timedelta
+import os
+
+w.start()
+today = datetime.today().strftime('%Y-%m-%d')
+
+# 1. 全 A 代码
+codes = w.wset("sectorconstituent", date=today, sector="全部A股", usedf=True)[1]['wind_code'].tolist()
+
+# 2. 前日最高价（日级，已收盘）
+pre_date = pd.to_datetime(today) - timedelta(days=1)
+pre_high = w.wsd(codes, 'high',
+                 pd.to_datetime(today)-timedelta(days=7),
+                 pre_date, "PriceAdj=F", usedf=True)[1].iloc[-1].reindex(codes)
+
+# 3. 分段 wsq 取今日开盘价
+print('分段获取今日开盘价……')
+today_open = pd.Series(dtype=float, name='open')
+n = 3000   # 每段最多 3000 只，留余量
+for i in range(0, len(codes), n):
+    print(f'  第{i//n+1}段')
+    chunk = codes[i:i+n]
+    raw = w.wsq(chunk, 'rt_open', usedf=True)[1]
+    # raw = raw.drop(columns=[c for c in raw.columns if c not in chunk])
+    # seg = raw.T.squeeze().reindex(chunk)
+    today_open = pd.concat([today_open, raw])
+
+today_open = today_open.iloc[:,1].squeeze()  # Series，索引=wind_code
+
+# 3. 分段 wsq 取今日开盘价
+# print('分段获取今日开盘价……')
+# today_open = pd.Series(dtype=float)
+# n = 3000
+# for i in range(0, len(codes), n):
+#     chunk = codes[i:i+n]
+#     raw = w.wsq(chunk, 'open', usedf=True)[1]
+#     raw = raw.drop(columns=[c for c in raw.columns if c not in chunk])
+#     seg = raw.T.squeeze()                 # Series，索引=wind_code
+#     today_open = pd.concat([today_open, seg])
+
+# today_open = today_open.groupby(level=0).first()  # ← 去重对齐
+# today_open = today_open.reindex(codes)            # 按全 A 顺序重新排列
+
+
+
+# 4. 跳空 2% 计算
+gap_pct = (today_open - pre_high) / pre_high * 100
+gap_stock = gap_pct[(today_open > pre_high * 1.07)].dropna()
+
+# 5. 输出
+result = pd.DataFrame({'wind_code': gap_stock.index, 'gap_pct': gap_stock.values})
+print(f'\n今日开盘价高于前日最高价 2% 的股票共 {len(result)} 只：')
+print(result.head(20))
+
+out_file = f'gap_up_2pct_intraday_{today}.csv'
+result.to_csv(out_file, index=False, encoding='utf-8-sig')
+print(f'结果已保存：{os.path.abspath(out_file)}')
